@@ -1,0 +1,119 @@
+一、什么是redis主从复制？
+主从复制，当用户往Master端写入数据时，通过Redis Sync机制将数据文件发送至Slave，Slave也会执行相同的操作确保数据一致；且实现Redis的主从复制非常简单。
+ 
+二、redis主从复制特点
+1、同一个Master可以拥有多个Slaves。
+2、Master下的Slave还可以接受同一架构中其它slave的链接与同步请求，实现数据的级联复制，即Master->Slave->Slave模式；
+3、Master以非阻塞的方式同步数据至slave，这将意味着Master会继续处理一个或多个slave的读写请求；
+4、Slave端同步数据也可以修改为非阻塞是的方式，当slave在执行新的同步时，它仍可以用旧的数据信息来提供查询；否则，当slave与master失去联系时，slave会返回一个错误给客户端；
+5、主从复制具有可扩展性，即多个slave专门提供只读查询与数据的冗余，Master端专门提供写操作；
+6、通过配置禁用Master数据持久化机制，将其数据持久化操作交给Slaves完成，避免在Master中要有独立的进程来完成此操作。
+ 
+三、redis主从复制原理
+      当启动一个Slave进程后，它会向Master发送一个SYNC Command，请求同步连接。无论是第一次连接还是重新连接，Master都会启动一个后台进程，将数据快照保存到数据文件中，同时Master会记录所有修改数据的命令并缓存在数据文件中。后台进程完成缓存操作后，Master就发送数据文件给Slave，Slave端将数据文件保存到硬盘上，然后将其在加载到内存中，接着Master就会所有修改数据的操作，将其发送给Slave端。若Slave出现故障导致宕机，恢复正常后会自动重新连接，Master收到Slave的连接后，将其完整的数据文件发送给Slave，如果Mater同时收到多个Slave发来的同步请求，Master只会在后台启动一个进程保存数据文件，然后将其发送给所有的Slave，确保Slave正常。
+
+四、服务器资源列表
+
+
+五、配置过程
+关于Redis的安装与配置这里便不操作，想了解的朋友请阅读：高性能数据库缓存之redis（一）http://cfwlxf.blog.51cto.com/3966339/1423106
+
+3、1 Master端操作如下：
+运行redis服务
+1	[root@redis_master sh]# redis-server/etc/redis/redis.conf
+查询redis运行日志
+
+##通过阅读日志文件输出的一些信息，可以看出Master与Slave建立连接时，需要执行的会话机制：加载数据文件至硬盘，用时0.012秒，可想而知速度是多么的快，当然得依据数据的大小去评测；服务连接至6379端口，收到Slave同步连接请求，开启“BGSAVE”同步等；
+
+清除Master端数据库中所有Key
+1
+2
+3
+4
+5	[root@redis_master sh]# redis-cli
+127.0.0.1:6379> FLUSHALL
+OK
+127.0.0.1:6379> keys *
+(empty list or set)
+3、2 Slave端操作如下：
+[root@redis_slave ~]# vim/etc/redis/redis.conf
+#添加Master端的IP与端口
+ 
+1
+2	# slaveof <masterip><masterport>
+slaveof 192.168.8.8 6379
+                                           
+运行redis
+1	[root@redis_slave ~]# redis-server/etc/redis/redis.conf
+查询Slave运行日志
+
+##分析redis日志，可以看出Slave与Master建立连接，数据同步的过程；如：发送SYNC命令，与Master端192.168.8.8:6379建立连接，然后Slave sync started；随后Master发送PING命令检查Slave的存活状态，复制被继续….
+ 
+查询数据库中的所有key
+1
+2
+3	[root@redis_slave ~]# redis-cli                
+127.0.0.1:6379> keys *
+(empty list or set)
+3、3 slave2端操作如下：
+[root@redis_slave2 ~]# vim/etc/redis/redis.conf
+#添加Slave端的IP与端口，实现级联复制；
+ 
+1
+2	# slaveof <masterip><masterport>
+slaveof 192.168.8.10 6379
+ 
+#运行redis服务
+1	[root@redis_slave2 ~]# redis-server/etc/redis/redis.conf
+ 
+查询redis运行日志
+
+##结果与Slave1类似，只不过Slave2与Slave1（192.168.8.10:6379）建立连接，同步数据；MySQL的级联复制便是这样，Master->Slave1->Slave2;
+#查询数据库的所有key
+[root@redis_slave2 ~]# redis-cli
+127.0.0.1:6379> keys *
+(empty list or set)
+3、4 master端操作如下：
+
+11	[root@redis_master sh]# redis-cli
+127.0.0.1:6379> MSET ID 1005 NAMEMariaDB City BeiJing
+OK
+127.0.0.1:6379> MGET ID NAME City
+1) "1005"
+2) "MariaDB"
+3) "BeiJing"
+127.0.0.1:6379> keys *
+1) "NAME"
+2) "ID"
+3) "City"
+ 
+3、5 客户端验证同步结果
+slave1端验证
+
+9
+10	[root@redis_slave ~]# redis-cli
+127.0.0.1:6379> auth !@#aedf
+127.0.0.1:6379> keys *
+1) "City"
+2) "NAME"
+3) "ID"
+127.0.0.1:6379> MGET ID NAME City
+1) "1005"
+2) "MariaDB"
+3) "BeiJing"
+slave2端验证
+
+9	[root@redis_slave2 ~]# redis-cli
+127.0.0.1:6379> keys *
+1) "ID"
+2) "NAME"
+3) "City"
+127.0.0.1:6379> MGET ID NAME City
+1) "1005"
+2) "MariaDB"
+3) "BeiJing"
+ 
+四、Master write，Slave read机制
+Redis的主从复制，通过程序实现数据的读写分离，让Master负责处理写请求，Slave负责处理读请求；通过扩展Slave处理更多的并发请求，减轻Master端的负载，如下图：
+
+此图画得比较简易，展示了实现Redis读写分离的过程，通过判断用户读写请求，将write请求发送给Redis Master处理，Read请求发送给Redis Slave处理，文章中的不足之处，欢迎大家指点。
